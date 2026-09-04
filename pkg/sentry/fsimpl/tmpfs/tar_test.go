@@ -17,9 +17,9 @@ package tmpfs
 import (
 	"archive/tar"
 	"bytes"
-	"crypto/rand"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"runtime"
 	"strings"
 	"testing"
@@ -126,12 +126,10 @@ func readFileFromTar(t *testing.T, src io.Reader, name string) []byte {
 	}
 }
 
-func randomBytes(t *testing.T, size int) []byte {
-	t.Helper()
+// randomBytes returns size bytes from a fixed seed, so that failures reproduce.
+func randomBytes(size int) []byte {
 	b := make([]byte, size)
-	if _, err := rand.Read(b); err != nil {
-		t.Fatalf("rand.Read: %v", err)
-	}
+	rand.NewChaCha8([32]byte{}).Read(b)
 	return b
 }
 
@@ -159,7 +157,7 @@ func TestTarRegularFileRoundTrip(t *testing.T) {
 	for _, size := range []int{0, 1, 32<<10 - 1, 32 << 10, 32<<10 + 1, 4<<20 + 1234} {
 		t.Run(fmt.Sprint(size), func(t *testing.T) {
 			ctx := contexttest.Context(t)
-			want := randomBytes(t, size)
+			want := randomBytes(size)
 			fs := mountFromTarTestOnly(t, ctx, tarWithFile(t, "./file", want))
 
 			var out bytes.Buffer
@@ -181,7 +179,7 @@ func TestTarRegularFileAllocation(t *testing.T) {
 		maxAlloc = 1 << 20
 	)
 	ctx := contexttest.Context(t)
-	src := tarWithFile(t, "./file", randomBytes(t, fileSize))
+	src := tarWithFile(t, "./file", randomBytes(fileSize))
 
 	var before, after runtime.MemStats
 	runtime.ReadMemStats(&before)

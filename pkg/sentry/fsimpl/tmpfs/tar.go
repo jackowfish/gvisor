@@ -331,10 +331,10 @@ func (tarDefaultReaderCallbacks) regularFileRead(ctx context.Context, hdr *tar.H
 	rf.inode.mu.Lock()
 	defer rf.inode.mu.Unlock()
 	rw := getRegularFileReadWriter(rf, 0, 0)
-	defer putRegularFileReadWriter(rw)
 	// Copy in fixed-size chunks, so that memory use does not depend on the size
 	// of the file.
 	n, err := io.Copy(safemem.ToIOWriter{Writer: rw}, tr)
+	putRegularFileReadWriter(rw)
 	if err != nil {
 		return fmt.Errorf("failed to write file content: %w", err)
 	}

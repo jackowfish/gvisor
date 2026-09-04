@@ -20,7 +20,6 @@
 //
 //	Kernel.extMu
 //	  TTY.mu
-//	  timekeeperTcpipTimer.mu
 //	  ThreadGroup.timerMu
 //	    Locks acquired by ktime.Timer methods
 //	      TaskSet.mu
@@ -1551,7 +1550,7 @@ func (k *Kernel) pauseTimeLocked(ctx context.Context) {
 			})
 		}
 	}
-	k.timekeeper.PauseUpdates()
+	k.timekeeper.Pause()
 }
 
 // resumeTimeLocked resumes all Timers and Timekeeper updates. If
@@ -1565,7 +1564,7 @@ func (k *Kernel) resumeTimeLocked(ctx context.Context) {
 	// The CPU clock ticker will automatically resume as task goroutines resume
 	// execution.
 
-	k.timekeeper.ResumeUpdates(k.vdsoParams)
+	k.timekeeper.Resume(k.vdsoParams)
 	for t := range k.tasks.Root.tids {
 		if t == t.tg.leader {
 			t.tg.itimerRealTimer.Resume()
@@ -1933,6 +1932,15 @@ func (k *Kernel) RealtimeClock() ktime.SampledClock {
 
 // MonotonicClock returns the application CLOCK_MONOTONIC clock.
 func (k *Kernel) MonotonicClock() ktime.SampledClock {
+	return k.timekeeper.monotonicClock
+}
+
+// MonotonicRawClock returns the system CLOCK_MONOTONIC_RAW clock. When it is
+// not enabled as a distinct clock this is the same as MonotonicClock.
+func (k *Kernel) MonotonicRawClock() ktime.SampledClock {
+	if k.timekeeper.monotonicRawClock != nil {
+		return k.timekeeper.monotonicRawClock
+	}
 	return k.timekeeper.monotonicClock
 }
 

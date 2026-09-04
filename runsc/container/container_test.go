@@ -512,6 +512,44 @@ func sleepSpecConf(t *testing.T) (*specs.Spec, *config.Config) {
 	return testutil.NewSpecWithArgs("sleep", "1000"), testutil.TestConfig(t)
 }
 
+func TestPostStartHookFailure(t *testing.T) {
+	for name, conf := range configs(t, false /* noOverlay */) {
+		t.Run(name, func(t *testing.T) {
+			spec, _ := sleepSpecConf(t)
+			spec.Hooks = &specs.Hooks{
+				Poststart: []specs.Hook{{
+					Path: "/bin/sh",
+					Args: []string{"/bin/sh", "-c", "exit 1"},
+				}},
+			}
+			_, bundleDir, cleanup, err := testutil.SetupContainer(spec, conf)
+			if err != nil {
+				t.Fatalf("error setting up container: %v", err)
+			}
+			defer cleanup()
+
+			args := Args{
+				ID:        testutil.RandomContainerID(),
+				Spec:      spec,
+				BundleDir: bundleDir,
+			}
+			c, err := New(conf, args)
+			if err != nil {
+				t.Fatalf("error creating container: %v", err)
+			}
+			defer func() {
+				if c != nil {
+					_ = c.Destroy()
+				}
+			}()
+
+			if err := c.Start(conf); err == nil {
+				t.Fatal("container start succeeded with a failing poststart hook")
+			}
+		})
+	}
+}
+
 func TestGetNetworkConfig(t *testing.T) {
 	for name, conf := range configs(t, false /* noOverlay */) {
 		t.Run(name, func(t *testing.T) {
@@ -3645,6 +3683,47 @@ func TestDestroyNotStarted(t *testing.T) {
 	}
 }
 
+// TestSignalCreated verifies that a container that was created but never started
+// can be killed. Per the OCI runtime spec, kill must work on created containers;
+// otherwise a never-started sandbox becomes unkillable under containerd, whose
+// stop path (kill, wait, delete) never reaches delete if kill is rejected.
+func TestSignalCreated(t *testing.T) {
+	spec, conf := sleepSpecConf(t)
+	rootDir, bundleDir, cleanup, err := testutil.SetupContainer(spec, conf)
+	if err != nil {
+		t.Fatalf("error setting up container: %v", err)
+	}
+	defer cleanup()
+
+	// Create the container, but never call Start.
+	args := Args{
+		ID:        testutil.RandomContainerID(),
+		Spec:      spec,
+		BundleDir: bundleDir,
+	}
+	c, err := New(conf, args)
+	if err != nil {
+		t.Fatalf("error creating container: %v", err)
+	}
+	defer c.Destroy()
+	if got, want := c.Status, Created; got != want {
+		t.Fatalf("container status got %v, want %v", got, want)
+	}
+
+	// SIGKILL of a created container must succeed and leave it Stopped so that
+	// the containerd stop/wait/delete sequence can complete.
+	if err := c.SignalContainer(unix.SIGKILL, true /* all */); err != nil {
+		t.Fatalf("SignalContainer(SIGKILL) on created container failed: %v", err)
+	}
+	c, err = Load(rootDir, FullID{ContainerID: args.ID}, LoadOpts{})
+	if err != nil {
+		t.Fatalf("error loading container after kill: %v", err)
+	}
+	if got, want := c.Status, Stopped; got != want {
+		t.Errorf("container status after SIGKILL got %v, want %v", got, want)
+	}
+}
+
 // TestDestroyStarting attempts to force a race between start and destroy.
 func TestDestroyStarting(t *testing.T) {
 	for i := 0; i < 10; i++ {
@@ -4322,6 +4401,67 @@ func TestProfile(t *testing.T) {
 		if fi.Size() == 0 {
 			t.Errorf("Profile file %s is empty: %+v", name, fi)
 		}
+	}
+}
+
+// TestProfileLive checks that live CPU and Heap profiling on a running sandbox.
+func TestProfileLive(t *testing.T) {
+	spec, conf := sleepSpecConf(t)
+	conf.ProfileEnable = true
+	_, bundleDir, cleanup, err := testutil.SetupContainer(spec, conf)
+	if err != nil {
+		t.Fatalf("error setting up container: %v", err)
+	}
+	defer cleanup()
+
+	args := Args{
+		ID:        testutil.RandomContainerID(),
+		Spec:      spec,
+		BundleDir: bundleDir,
+	}
+	cont, err := New(conf, args)
+	if err != nil {
+		t.Fatalf("error creating container: %v", err)
+	}
+	defer cont.Destroy()
+	if err := cont.Start(conf); err != nil {
+		t.Fatalf("error starting container: %v", err)
+	}
+
+	// Test live CPU profiling.
+	cpuFile, err := os.Create(filepath.Join(t.TempDir(), "live_cpu.pprof"))
+	if err != nil {
+		t.Fatalf("creating cpu file: %v", err)
+	}
+	defer cpuFile.Close()
+
+	if err := cont.Sandbox.CPUProfile(cpuFile, 500*time.Millisecond); err != nil {
+		t.Fatalf("CPUProfile: %v", err)
+	}
+	fi, err := cpuFile.Stat()
+	if err != nil {
+		t.Fatalf("stat cpu file: %v", err)
+	}
+	if fi.Size() == 0 {
+		t.Errorf("live CPU profile file is empty")
+	}
+
+	// Test live Heap profiling.
+	heapFile, err := os.Create(filepath.Join(t.TempDir(), "live_heap.pprof"))
+	if err != nil {
+		t.Fatalf("creating heap file: %v", err)
+	}
+	defer heapFile.Close()
+
+	if err := cont.Sandbox.HeapProfile(heapFile, 0); err != nil {
+		t.Fatalf("HeapProfile: %v", err)
+	}
+	fi, err = heapFile.Stat()
+	if err != nil {
+		t.Fatalf("stat heap file: %v", err)
+	}
+	if fi.Size() == 0 {
+		t.Errorf("live Heap profile file is empty")
 	}
 }
 

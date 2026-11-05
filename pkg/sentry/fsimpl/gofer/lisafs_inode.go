@@ -634,6 +634,7 @@ func (i *lisafsInode) statfs(ctx context.Context) (linux.Statfs, error) {
 
 func (i *lisafsInode) restoreInode(ctx context.Context, inode *lisafs.Inode, opts *vfs.CompleteRestoreOptions, d *dentry) error {
 	i.controlFD = i.fs.client.NewFD(inode.ControlFD)
+	i.stale.Store(false)
 	if err := i.restoreInoKey(inoKeyFromStatx(&inode.Stat)); err != nil {
 		return err
 	}

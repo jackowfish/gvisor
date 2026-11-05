@@ -560,6 +560,9 @@ func (d *dentry) restoreFile(ctx context.Context, opts *vfs.CompleteRestoreOptio
 		inode, err := controlFD.Walk(ctx, d.name)
 		if err != nil {
 			if !d.isDir() || !d.forMountpoint {
+				if d.restoreMissing(opts, err) {
+					return nil
+				}
 				return fmt.Errorf("failed to walk %q of type %#o in mount %q: %w", genericDebugPathname(it.fs, d), linux.FileMode(it.inode.fileType()), it.fs.iopts.UniqueID, err)
 			}
 
@@ -586,6 +589,9 @@ func (d *dentry) restoreFile(ctx context.Context, opts *vfs.CompleteRestoreOptio
 		})
 		if err != nil {
 			if !d.isDir() || !d.forMountpoint {
+				if d.restoreMissing(opts, err) {
+					return nil
+				}
 				return fmt.Errorf("failed to walk %q of type %#o in mount %q: %w", genericDebugPathname(it.fs, d), linux.FileMode(it.inode.fileType()), it.fs.iopts.UniqueID, err)
 			}
 

@@ -1095,6 +1095,9 @@ var logUnimplementedBlockDevOpenOnce sync.Once
 // Preconditions: The caller must hold no locks (since opening pipes may block
 // indefinitely).
 func (d *dentry) open(ctx context.Context, rp *vfs.ResolvingPath, opts *vfs.OpenOptions) (*vfs.FileDescription, error) {
+	if d.inode.isStale() {
+		return nil, linuxerr.ESTALE
+	}
 	ats := vfs.AccessTypesForOpenFlags(opts)
 
 	if ft := d.inode.fileType(); opts.FileExec && ft != linux.S_IFREG && ft != linux.S_IFLNK {

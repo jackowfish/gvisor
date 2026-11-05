@@ -1258,6 +1258,135 @@ func TestCheckpointRestoreInodeNumbers(t *testing.T) {
 	}
 }
 
+// TestCheckpointRestoreMissingFiles checks restore when a bind mount no longer
+// has files that the container holds open.
+func TestCheckpointRestoreMissingFiles(t *testing.T) {
+	for _, stale := range []bool{false, true} {
+		t.Run(fmt.Sprintf("stale=%t", stale), func(t *testing.T) {
+			testCheckpointRestoreMissingFiles(t, stale)
+		})
+	}
+}
+
+func testCheckpointRestoreMissingFiles(t *testing.T, stale bool) {
+	dir, err := os.MkdirTemp(testutil.TmpDir(), "checkpoint-test")
+	if err != nil {
+		t.Fatalf("os.MkdirTemp() failed: %v", err)
+	}
+	defer os.RemoveAll(dir)
+	if err := os.Chmod(dir, 0777); err != nil {
+		t.Fatalf("error chmoding file: %q, %v", dir, err)
+	}
+	src := filepath.Join(dir, "src")
+	if err := os.MkdirAll(filepath.Join(src, "subdir"), 0777); err != nil {
+		t.Fatalf("os.MkdirAll() failed: %v", err)
+	}
+	for _, name := range []string{"file", "subdir/file"} {
+		if err := os.WriteFile(filepath.Join(src, name), []byte("old"), 0666); err != nil {
+			t.Fatalf("os.WriteFile() failed: %v", err)
+		}
+	}
+	dst := filepath.Join(dir, "mnt")
+	file := filepath.Join(dst, "file")
+
+	spec, conf := sleepSpecConf(t)
+	if stale {
+		conf.RestoreMissingFiles = config.RestoreMissingFilesStale
+	}
+	// Keep the files and the directory open so that their dentries are
+	// checkpointed.
+	spec.Process.Args = []string{"/bin/sh", "-c", fmt.Sprintf("exec 3<%s 4<%s/subdir/file 5<%s/subdir; exec sleep 1000", file, dst, dst)}
+	spec.Mounts = append(spec.Mounts, specs.Mount{Destination: dst, Source: src, Type: "bind"})
+
+	_, bundleDir, cleanup, err := testutil.SetupContainer(spec, conf)
+	if err != nil {
+		t.Fatalf("error setting up container: %v", err)
+	}
+	defer cleanup()
+
+	args := Args{
+		ID:        testutil.RandomContainerID(),
+		Spec:      spec,
+		BundleDir: bundleDir,
+	}
+	cont, err := New(conf, args)
+	if err != nil {
+		t.Fatalf("error creating container: %v", err)
+	}
+	defer func() { cont.Destroy() }()
+	if err := cont.Start(conf); err != nil {
+		t.Fatalf("error starting container: %v", err)
+	}
+	// The shell opens the files before it executes sleep.
+	if err := waitForProcessList(cont, []*controlapi.Process{newProcessBuilder().Cmd("sleep").Process()}); err != nil {
+		t.Fatal(err)
+	}
+
+	// checkpointRestore restores cont in place from a new checkpoint. It calls
+	// beforeRestore after the checkpoint.
+	checkpointRestore := func(beforeRestore func()) error {
+		imageDir, err := os.MkdirTemp(dir, "image")
+		if err != nil {
+			t.Fatalf("os.MkdirTemp() failed: %v", err)
+		}
+		if err := cont.Checkpoint(conf, imageDir, sandbox.CheckpointOpts{Compression: statefile.CompressionLevelDefault}); err != nil {
+			t.Fatalf("error checkpointing container to file: %v", err)
+		}
+		cont.Destroy()
+		beforeRestore()
+		cont, err = New(conf, args)
+		if err != nil {
+			t.Fatalf("error creating container: %v", err)
+		}
+		return cont.Restore(conf, imageDir, sandbox.DirectIOOff, false /* background */, nil /* networkArgs */)
+	}
+
+	// checkStale checks that the open file descriptors for removed files fail
+	// with ESTALE.
+	checkStale := func() {
+		for _, cmd := range [][]string{
+			{"/bin/cat", "/proc/1/fd/3"},
+			{"/bin/cat", "/proc/1/fd/4"},
+			{"/bin/ls", "/proc/1/fd/5/"},
+		} {
+			out, err := executeCombinedOutput(conf, cont, nil, cmd[0], cmd[1:]...)
+			if err == nil || !strings.Contains(string(out), "Stale file handle") {
+				t.Errorf("%v: got output %q, err %v, want ESTALE", cmd, out, err)
+			}
+		}
+	}
+
+	err = checkpointRestore(func() {
+		if err := os.Remove(filepath.Join(src, "file")); err != nil {
+			t.Fatalf("os.Remove() failed: %v", err)
+		}
+		if err := os.RemoveAll(filepath.Join(src, "subdir")); err != nil {
+			t.Fatalf("os.RemoveAll() failed: %v", err)
+		}
+	})
+	if !stale {
+		if err == nil {
+			t.Fatalf("restore succeeded, want error for missing files")
+		}
+		return
+	}
+	if err != nil {
+		t.Fatalf("error restoring container: %v", err)
+	}
+	checkStale()
+
+	// The removed path must resolve to the remote filesystem again.
+	if out, err := executeCombinedOutput(conf, cont, nil, "/bin/sh", "-c", fmt.Sprintf("echo new > %s && cat %s", file, file)); err != nil || string(out) != "new\n" {
+		t.Errorf("re-create %s: got output %q, err %v, want %q", file, out, err, "new\n")
+	}
+
+	// A sandbox with stale files must checkpoint and restore again.
+	if err := checkpointRestore(func() {}); err != nil {
+		t.Fatalf("error restoring container a second time: %v", err)
+	}
+	checkStale()
+}
+
 // TestCheckpointRestoreEROFS does the checkpoint/restore test on each platform using
 // an EROFS image as the rootfs.
 func TestCheckpointRestoreEROFS(t *testing.T) {

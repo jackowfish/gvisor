@@ -101,6 +101,9 @@ func (fd *regularFileFD) OnClose(ctx context.Context) error {
 // Allocate implements vfs.FileDescriptionImpl.Allocate.
 func (fd *regularFileFD) Allocate(ctx context.Context, mode, offset, length uint64) error {
 	d := fd.dentry()
+	if d.inode.isStale() {
+		return linuxerr.ESTALE
+	}
 	return d.doAllocate(ctx, offset, length, func() error {
 		return d.inode.allocate(ctx, mode, offset, length)
 	})
@@ -122,6 +125,9 @@ func (fd *regularFileFD) PRead(ctx context.Context, dst usermem.IOSequence, offs
 
 	if offset < 0 {
 		return 0, linuxerr.EINVAL
+	}
+	if d.inode.isStale() {
+		return 0, linuxerr.ESTALE
 	}
 
 	// Check that flags are supported.
@@ -198,6 +204,9 @@ func (fd *regularFileFD) pwrite(ctx context.Context, src usermem.IOSequence, off
 	}
 
 	d := fd.dentry()
+	if d.inode.isStale() {
+		return 0, offset, linuxerr.ESTALE
+	}
 
 	d.inode.metadataMu.Lock()
 	defer d.inode.metadataMu.Unlock()
@@ -658,12 +667,19 @@ func regularFileSeekLocked(ctx context.Context, d *dentry, fdOffset, offset int6
 
 // Sync implements vfs.FileDescriptionImpl.Sync.
 func (fd *regularFileFD) Sync(ctx context.Context, opts vfs.SyncOptions) error {
-	return fd.dentry().syncCachedFile(ctx, false /* forFilesystemSync */, opts.DataOnly)
+	d := fd.dentry()
+	if d.inode.isStale() {
+		return linuxerr.ESTALE
+	}
+	return d.syncCachedFile(ctx, false /* forFilesystemSync */, opts.DataOnly)
 }
 
 // ConfigureMMap implements vfs.FileDescriptionImpl.ConfigureMMap.
 func (fd *regularFileFD) ConfigureMMap(ctx context.Context, opts *memmap.MMapOpts) error {
 	d := fd.dentry()
+	if d.inode.isStale() {
+		return linuxerr.ESTALE
+	}
 	// Force sentry page caching at your own risk.
 	if !d.inode.fs.opts.forcePageCache {
 		switch d.inode.fs.opts.interop {
@@ -743,6 +759,9 @@ func (d *dentry) CopyMapping(ctx context.Context, ms memmap.MappingSpace, srcAR,
 
 // Translate implements memmap.Mappable.Translate.
 func (d *dentry) Translate(ctx context.Context, required, optional memmap.MappableRange, at hostarch.AccessType) ([]memmap.Translation, error) {
+	if d.inode.isStale() {
+		return nil, &memmap.BusError{Err: linuxerr.ESTALE}
+	}
 	d.inode.handleMu.RLock()
 	defer d.inode.handleMu.RUnlock()
 	if d.inode.mmapFD.RacyLoad() >= 0 && !d.inode.fs.opts.forcePageCache {

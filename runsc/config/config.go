@@ -473,6 +473,10 @@ type Config struct {
 	// performed during restore.
 	RestoreSpecValidation RestoreSpecValidationPolicy `flag:"restore-spec-validation"`
 
+	// RestoreMissingFiles controls restore of files that were removed from
+	// gofer mounts after checkpoint.
+	RestoreMissingFiles RestoreMissingFilesPolicy `flag:"restore-missing-files"`
+
 	// GVisorMarkerFile enables the /proc/gvisor/kernel_is_gvisor marker file.
 	GVisorMarkerFile bool `flag:"gvisor-marker-file"`
 
@@ -1847,6 +1851,56 @@ func (p RestoreSpecValidationPolicy) String() string {
 		return "enforce"
 	default:
 		panic(fmt.Sprintf("invalid restore spec validation policy %d", p))
+	}
+}
+
+// RestoreMissingFilesPolicy controls restore of files that were removed from
+// gofer mounts after checkpoint.
+type RestoreMissingFilesPolicy int
+
+// RestoreMissingFilesPolicy values.
+const (
+	// RestoreMissingFilesFail fails the restore.
+	RestoreMissingFilesFail RestoreMissingFilesPolicy = iota
+
+	// RestoreMissingFilesStale restores the files as stale files. Operations
+	// on open file descriptors for stale files fail with ESTALE.
+	RestoreMissingFilesStale
+)
+
+// Set implements flag.Value. Set(String()) should be idempotent.
+func (p *RestoreMissingFilesPolicy) Set(v string) error {
+	switch v {
+	case "fail":
+		*p = RestoreMissingFilesFail
+	case "stale":
+		*p = RestoreMissingFilesStale
+	default:
+		return fmt.Errorf("invalid restore missing files policy %q", v)
+	}
+	return nil
+}
+
+// Ptr returns a pointer to `p`.
+// Useful in flag declaration line.
+func (p RestoreMissingFilesPolicy) Ptr() *RestoreMissingFilesPolicy {
+	return &p
+}
+
+// Get implements flag.Get.
+func (p *RestoreMissingFilesPolicy) Get() any {
+	return *p
+}
+
+// String implements flag.String.
+func (p RestoreMissingFilesPolicy) String() string {
+	switch p {
+	case RestoreMissingFilesFail:
+		return "fail"
+	case RestoreMissingFilesStale:
+		return "stale"
+	default:
+		panic(fmt.Sprintf("invalid restore missing files policy %d", p))
 	}
 }
 

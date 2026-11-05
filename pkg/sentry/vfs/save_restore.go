@@ -134,6 +134,12 @@ type CompleteRestoreOptions struct {
 	// implementations backed by remote filesystems should validate that file
 	// mtimes have not changed between checkpoint and restore.
 	ValidateFileModificationTimestamps bool
+
+	// If MissingFilesStale is true, filesystem implementations backed by
+	// remote filesystems should restore files that no longer exist as stale
+	// files instead of failing the restore. Operations on a stale file fail
+	// with ESTALE.
+	MissingFilesStale bool
 }
 
 // saveMounts is called by stateify.

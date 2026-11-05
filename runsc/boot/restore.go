@@ -567,7 +567,10 @@ func (r *restorer) restore(l *Loader) error {
 		r.timer.Reached("rootfs upper layer extracted")
 		return nil
 	}
-	if err := l.k.LoadFrom(ctx, r.stateFile, r.asyncMFLoader, nil, l, clocks, &vfs.CompleteRestoreOptions{}, r.timer.Fork("kernel load")); err != nil {
+	vfsOpts := &vfs.CompleteRestoreOptions{
+		MissingFilesStale: l.root.conf.RestoreMissingFiles == config.RestoreMissingFilesStale,
+	}
+	if err := l.k.LoadFrom(ctx, r.stateFile, r.asyncMFLoader, nil, l, clocks, vfsOpts, r.timer.Fork("kernel load")); err != nil {
 		return fmt.Errorf("failed to load kernel: %w", err)
 	}
 	// Stop the restore if a hash does not cover all of the statefile data.

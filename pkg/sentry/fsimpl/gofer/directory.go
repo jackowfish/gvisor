@@ -191,6 +191,9 @@ func (fd *directoryFD) IterDirents(ctx context.Context, cb vfs.IterDirentsCallba
 	defer fd.mu.Unlock()
 
 	d := fd.dentry()
+	if d.inode.isStale() {
+		return linuxerr.ESTALE
+	}
 	if fd.dirents == nil {
 		ds, err := d.getDirents(ctx)
 		if err != nil {

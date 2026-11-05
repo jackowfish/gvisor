@@ -928,6 +928,7 @@ func (i *directfsInode) restoreFile(ctx context.Context, controlFD int, opts *vf
 		return fmt.Errorf("failed to stat %q in mount %q: %w", genericDebugPathname(i.fs, d), i.fs.iopts.UniqueID, err)
 	}
 	i.controlFD = controlFD
+	i.stale.Store(false)
 	if err := i.restoreInoKey(inoKeyFromUnixStatx(&stat)); err != nil {
 		return err
 	}

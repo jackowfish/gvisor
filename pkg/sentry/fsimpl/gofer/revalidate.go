@@ -16,6 +16,7 @@ package gofer
 
 import (
 	"gvisor.dev/gvisor/pkg/context"
+	"gvisor.dev/gvisor/pkg/errors/linuxerr"
 	"gvisor.dev/gvisor/pkg/sentry/vfs"
 	"gvisor.dev/gvisor/pkg/sync"
 )
@@ -45,6 +46,10 @@ func (errRevalidationStepDone) Error() string {
 // Preconditions:
 //   - fs.renameMu must be locked.
 func (fs *filesystem) revalidatePath(ctx context.Context, rpOrig resolvingPath, start *dentry, ds **[]*dentry) error {
+	// Path resolution cannot continue from a stale directory.
+	if start.inode.isStale() {
+		return linuxerr.ESTALE
+	}
 	// Revalidation is done even if start is synthetic in case the path is
 	// something like: ../non_synthetic_file.
 	if fs.opts.interop != InteropModeShared {

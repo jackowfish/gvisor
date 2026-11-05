@@ -1033,6 +1033,10 @@ type inode struct {
 	// to store file data for save/restore.
 	savedDeletedData []byte
 
+	// stale is true if the remote file for this inode did not exist when the
+	// filesystem was restored. Operations on a stale inode fail with ESTALE.
+	stale atomicbitops.Bool
+
 	// mmapFile implements memmap.File for mmapFD.
 	//
 	// Note that mmapFile.FD() does not necessarily match mmapFD. The latter
@@ -1109,6 +1113,10 @@ func (i *inode) incRef() {
 
 func (i *inode) isSynthetic() bool {
 	return i.impl == nil
+}
+
+func (i *inode) isStale() bool {
+	return i.stale.Load()
 }
 
 func (i *inode) cachedMetadataAuthoritative() bool {
@@ -1446,6 +1454,9 @@ func (d *dentry) refreshSizeLocked(ctx context.Context) error {
 
 // Preconditions: !i.isSynthetic().
 func (i *inode) updateMetadata(ctx context.Context) error {
+	if i.isStale() {
+		return linuxerr.ESTALE
+	}
 	// d.inode.metadataMu must be locked *before* we stat so that we do not end up
 	// updating stale attributes in d.updateMetadataFromStatxLocked().
 	i.metadataMu.Lock()
@@ -2181,8 +2192,9 @@ func (d *dentry) destroyLocked(ctx context.Context) {
 	d.inode.fs.inodeMu.Lock()
 	d.inode.refs.DecRef(func() {
 		destroyInode = true
-		if !d.isDir() {
-			// Only non-directory inodes are cached in inodeByKey.
+		// Only non-directory inodes are cached in inodeByKey. A stale inode
+		// keeps its old key, and another inode can now use that key.
+		if !d.isDir() && d.inode.fs.inodeByKey[d.inode.inoKey] == d.inode {
 			delete(d.inode.fs.inodeByKey, d.inode.inoKey)
 		}
 	})
@@ -2565,6 +2577,9 @@ func (fd *fileDescription) dentry() *dentry {
 // Stat implements vfs.FileDescriptionImpl.Stat.
 func (fd *fileDescription) Stat(ctx context.Context, opts vfs.StatOptions) (linux.Statx, error) {
 	d := fd.dentry()
+	if d.inode.isStale() {
+		return linux.Statx{}, linuxerr.ESTALE
+	}
 	const validMask = uint32(linux.STATX_MODE | linux.STATX_UID | linux.STATX_GID | linux.STATX_ATIME | linux.STATX_MTIME | linux.STATX_CTIME | linux.STATX_SIZE | linux.STATX_BLOCKS | linux.STATX_BTIME)
 	if !d.inode.cachedMetadataAuthoritative() && opts.Mask&validMask != 0 && opts.Sync != linux.AT_STATX_DONT_SYNC {
 		// Use specialFileFD.handle.fileLisa for the Stat if available, for the
@@ -2586,6 +2601,9 @@ func (fd *fileDescription) Stat(ctx context.Context, opts vfs.StatOptions) (linu
 
 // SetStat implements vfs.FileDescriptionImpl.SetStat.
 func (fd *fileDescription) SetStat(ctx context.Context, opts vfs.SetStatOptions) error {
+	if fd.dentry().inode.isStale() {
+		return linuxerr.ESTALE
+	}
 	fs := fd.filesystem()
 	fs.renameMu.RLock()
 	defer fs.renameMu.RUnlock()
@@ -2594,22 +2612,38 @@ func (fd *fileDescription) SetStat(ctx context.Context, opts vfs.SetStatOptions)
 
 // ListXattr implements vfs.FileDescriptionImpl.ListXattr.
 func (fd *fileDescription) ListXattr(ctx context.Context, size uint64) ([]string, error) {
-	return fd.dentry().listXattr(ctx, size)
+	d := fd.dentry()
+	if d.inode.isStale() {
+		return nil, linuxerr.ESTALE
+	}
+	return d.listXattr(ctx, size)
 }
 
 // GetXattr implements vfs.FileDescriptionImpl.GetXattr.
 func (fd *fileDescription) GetXattr(ctx context.Context, opts vfs.GetXattrOptions) (string, error) {
-	return fd.dentry().getXattr(ctx, auth.CredentialsFromContext(ctx), &opts)
+	d := fd.dentry()
+	if d.inode.isStale() {
+		return "", linuxerr.ESTALE
+	}
+	return d.getXattr(ctx, auth.CredentialsFromContext(ctx), &opts)
 }
 
 // SetXattr implements vfs.FileDescriptionImpl.SetXattr.
 func (fd *fileDescription) SetXattr(ctx context.Context, opts vfs.SetXattrOptions) error {
-	return fd.dentry().setXattr(ctx, auth.CredentialsFromContext(ctx), &opts)
+	d := fd.dentry()
+	if d.inode.isStale() {
+		return linuxerr.ESTALE
+	}
+	return d.setXattr(ctx, auth.CredentialsFromContext(ctx), &opts)
 }
 
 // RemoveXattr implements vfs.FileDescriptionImpl.RemoveXattr.
 func (fd *fileDescription) RemoveXattr(ctx context.Context, name string) error {
-	return fd.dentry().removeXattr(ctx, auth.CredentialsFromContext(ctx), name)
+	d := fd.dentry()
+	if d.inode.isStale() {
+		return linuxerr.ESTALE
+	}
+	return d.removeXattr(ctx, auth.CredentialsFromContext(ctx), name)
 }
 
 // LockBSD implements vfs.FileDescriptionImpl.LockBSD.

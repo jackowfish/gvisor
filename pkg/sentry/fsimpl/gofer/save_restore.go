@@ -114,6 +114,10 @@ func (fd *specialFileFD) savePipeData(ctx context.Context) error {
 }
 
 func (d *dentry) prepareSaveDead(ctx context.Context) error {
+	if d.inode.isStale() {
+		// There is no remote file to save or restore.
+		return nil
+	}
 	if !d.inode.isRegularFile() && !d.isDir() {
 		return fmt.Errorf("gofer.dentry(%q).prepareSaveDead: only deleted dentries for regular files and directories can be saved, got %s", genericDebugPathname(d.inode.fs, d), linux.FileMode(d.inode.mode.Load()))
 	}
@@ -210,7 +214,7 @@ func (d *dentry) prepareSaveRecursive(ctx context.Context, opts vfs.PrepareSaveO
 
 // beforeSave is invoked by stateify.
 func (d *dentry) beforeSave() {
-	if d.vfsd.IsDead() {
+	if d.vfsd.IsDead() && !d.inode.isStale() {
 		if _, ok := d.inode.fs.savedDeletedOpenDentries[d]; !ok {
 			panic(fmt.Sprintf("gofer.dentry(%q).beforeSave: dead dentry is not saved in fs.savedDeletedOpenDentries (deleted=%t, synthetic=%t)", genericDebugPathname(d.inode.fs, d), d.isDeleted(), d.inode.isSynthetic()))
 		}
@@ -287,9 +291,11 @@ func (fs *filesystem) CompleteRestore(ctx context.Context, opts vfs.CompleteRest
 	}
 
 	// Restore remaining dentries.
-	if err := fs.root.restoreDescendantsRecursive(ctx, &opts); err != nil {
+	var stale []*dentry
+	if err := fs.root.restoreDescendantsRecursive(ctx, &opts, &stale); err != nil {
 		return err
 	}
+	fs.invalidateStale(ctx, stale)
 
 	// Restore deleted files which are still accessible via open application FDs.
 	filesToDelete := make(map[*dentry]string)
@@ -361,8 +367,12 @@ func (fs *filesystem) CompleteRestore(ctx context.Context, opts vfs.CompleteRest
 	return nil
 }
 
+// restoreDescendantsRecursive restores all descendants of d. It appends
+// children with missing remote files to stale and does not restore their
+// descendants.
+//
 // Preconditions: d is not synthetic.
-func (d *dentry) restoreDescendantsRecursive(ctx context.Context, opts *vfs.CompleteRestoreOptions) error {
+func (d *dentry) restoreDescendantsRecursive(ctx context.Context, opts *vfs.CompleteRestoreOptions, stale *[]*dentry) error {
 	d.childrenMu.Lock()
 	defer d.childrenMu.Unlock()
 	for _, child := range d.children {
@@ -375,11 +385,58 @@ func (d *dentry) restoreDescendantsRecursive(ctx context.Context, opts *vfs.Comp
 		if err := child.restoreFile(ctx, opts); err != nil {
 			return err
 		}
-		if err := child.restoreDescendantsRecursive(ctx, opts); err != nil {
+		if child.inode.isStale() {
+			*stale = append(*stale, child)
+			continue
+		}
+		if err := child.restoreDescendantsRecursive(ctx, opts, stale); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// restoreMissing marks d.inode stale if opts permit it and err shows that the
+// remote file for d does not exist. It returns true if d.inode is stale.
+func (d *dentry) restoreMissing(opts *vfs.CompleteRestoreOptions, err error) bool {
+	if !opts.MissingFilesStale || !linuxerr.Equals(linuxerr.ENOENT, err) {
+		return false
+	}
+	if !d.inode.isRegularFile() && !d.isDir() {
+		return false
+	}
+	log.Warningf("Remote file %q in mount %q does not exist, restoring it as stale", genericDebugPathname(d.inode.fs, d), d.inode.fs.iopts.UniqueID)
+	d.inode.stale.Store(true)
+	return true
+}
+
+// invalidateStale removes each dentry in stale and its descendants from the
+// dentry tree, and marks their inodes stale.
+func (fs *filesystem) invalidateStale(ctx context.Context, stale []*dentry) {
+	if len(stale) == 0 {
+		return
+	}
+	var ds *[]*dentry
+	fs.renameMu.Lock()
+	for _, d := range stale {
+		// If restoreFile restores a hard link to d.inode after d, d.inode is not stale.
+		if d.inode.isStale() {
+			d.markStaleRecursive()
+		}
+		d.invalidate(ctx, fs.vfsfs.VirtualFilesystem(), &ds)
+	}
+	fs.renameMuUnlockAndCheckCaching(ctx, &ds)
+}
+
+func (d *dentry) markStaleRecursive() {
+	d.inode.stale.Store(true)
+	d.childrenMu.Lock()
+	defer d.childrenMu.Unlock()
+	for _, child := range d.children {
+		if child != nil && !child.inode.isSynthetic() {
+			child.markStaleRecursive()
+		}
+	}
 }
 
 // restoreDeleted restores a deleted dentry for a directory or regular file.
@@ -394,6 +451,13 @@ func (d *dentry) restoreDeleted(ctx context.Context, opts *vfs.CompleteRestoreOp
 		if err := parent.restoreDeleted(ctx, opts, filesToDelete, dirsToDelete); err != nil {
 			return err
 		}
+	}
+	if parent.inode.isStale() {
+		// d cannot be re-created in a directory that no longer exists.
+		d.inode.stale.Store(true)
+		d.inode.savedDeletedData = nil
+		delete(d.inode.fs.savedDeletedOpenDentries, d)
+		return nil
 	}
 	switch {
 	case d.inode.isRegularFile():
